@@ -1,0 +1,12 @@
+[Unit]
+Description=Retry the Technocore DID note registration until verified
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1h
+RandomizedDelaySec=5min
+Persistent=true
+Unit=technocore-did-register.service
+
+[Install]
+WantedBy=timers.target

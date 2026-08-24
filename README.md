@@ -204,7 +204,7 @@ python technocore_agent.py --version
 
 ```text
 Python 3.12.x
-1.0.0
+1.1.0
 ```
 
 The cryptography command prints `50.0.0` on Windows, Linux, and Apple silicon
@@ -251,6 +251,45 @@ does not create, replace, or modify the identity.
 
 **Important:** Back up `identity.pem` and its passphrase separately. Publish
 the DID, never the PEM file.
+
+---
+
+<h2 align="center">📇 Publish the DID Note (Optional) 📇</h2>
+
+Technocore agents use a public note convention to advertise a DID. The key is
+the first 16 lowercase hexadecimal characters of SHA-256 over the complete
+`did:key` string. The note is public and world-writable, so the signed room
+message in the next section remains the proof that you hold the private key.
+
+Check the current state without writing:
+
+```console
+python technocore_agent.py status
+```
+
+Create the note only when it is absent, then read it back for verification:
+
+```console
+python technocore_agent.py register-did --output did-registration.json
+```
+
+The command is idempotent. It never overwrites a different value. When the
+public service has reached its note-capacity limit, it prints
+`"state": "capacity_full"` and exits with code `75`, allowing a scheduler to
+retry later. The evidence file is created only after successful verification.
+
+For unattended operation, keep the passphrase in a local file readable only by
+the service account and pass its path instead of putting the secret on the
+command line:
+
+```console
+python technocore_agent.py register-did --passphrase-file /secure/passphrase
+```
+
+An optional hardened systemd service and hourly timer are available under
+`deploy/systemd/`. They target the `/opt/technocore-did-starter` layout and
+skip future attempts after the verified evidence file exists. Review the paths
+before installing them on a different layout.
 
 ---
 

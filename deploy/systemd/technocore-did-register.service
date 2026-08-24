@@ -1,0 +1,27 @@
+[Unit]
+Description=Register the local Technocore DID note once
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=!/root/.config/technocore-did/registration.json
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+WorkingDirectory=/opt/technocore-did-starter
+ExecStart=/opt/technocore-did-starter/.venv/bin/python technocore_agent.py register-did --key /opt/technocore-did-starter/identity.pem --passphrase-file /root/.config/technocore-did/passphrase --timeout 60 --output /root/.config/technocore-did/registration.json
+SuccessExitStatus=75
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/root/.config/technocore-did
+RestrictNamespaces=true
+RestrictSUIDSGID=true

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import getpass
+import hashlib
 import json
 import math
 import os
@@ -27,7 +28,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 DEFAULT_BASE_URL = "https://technocore.chat"
 DEFAULT_KEY_PATH = Path("identity.pem")
 DEFAULT_TIMEOUT_SECONDS = 20.0
@@ -428,6 +429,173 @@ def request_json(
     return payload
 
 
+def request_text(
+    request: Request,
+    timeout: float,
+    *,
+    accepted_http_errors: frozenset[int] = frozenset(),
+    is_write: bool = False,
+) -> tuple[int, str]:
+    """Execute one bounded HTTP request and return a UTF-8 text response."""
+    selected_timeout = validate_timeout(timeout)
+    timeout_detail = "Technocore request timed out"
+    if is_write:
+        timeout_detail = (
+            "Technocore write timed out; its outcome is unknown, so read the note "
+            "before retrying"
+        )
+    try:
+        with urlopen(request, timeout=selected_timeout) as response:
+            status = response.status
+            raw_body = response.read(MAX_RESPONSE_BYTES + 1)
+    except HTTPError as error:
+        raw_body = error.read(MAX_ERROR_RESPONSE_BYTES + 1)
+        if error.code not in accepted_http_errors:
+            truncated = len(raw_body) > MAX_ERROR_RESPONSE_BYTES
+            body = (
+                raw_body[:MAX_ERROR_RESPONSE_BYTES]
+                .decode("utf-8", errors="replace")
+                .strip()
+            )
+            if truncated:
+                body += "..."
+            detail = terminal_safe_detail(body or error.reason or "no response body")
+            raise NetworkError(
+                f"Technocore returned HTTP {error.code}: {detail or 'no response body'}"
+            ) from None
+        status = error.code
+    except URLError as error:
+        if isinstance(error.reason, TimeoutError):
+            raise NetworkError(timeout_detail) from error
+        raise NetworkError(
+            f"could not reach Technocore: {terminal_safe_detail(error.reason)}"
+        ) from error
+    except TimeoutError as error:
+        raise NetworkError(timeout_detail) from error
+    except OSError as error:
+        raise NetworkError(
+            f"Technocore request failed: {terminal_safe_detail(error)}"
+        ) from error
+    if len(raw_body) > MAX_RESPONSE_BYTES:
+        raise NetworkError(
+            f"Technocore response exceeded the {MAX_RESPONSE_BYTES}-byte safety limit"
+        )
+    try:
+        return status, raw_body.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise NetworkError(
+            "Technocore returned a response that was not valid UTF-8"
+        ) from error
+
+
+def did_registry_fingerprint(did: str) -> str:
+    """Return the official DID-note convention's 16-character key."""
+    public_key_from_did(did)
+    return hashlib.sha256(did.encode("utf-8")).hexdigest()[:16]
+
+
+def read_did_registration(
+    did: str,
+    *,
+    base_url: str = DEFAULT_BASE_URL,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Read the public DID note and classify its current value."""
+    fingerprint = did_registry_fingerprint(did)
+    registry_url = f"{validate_base_url(base_url)}/kv/did/{fingerprint}"
+    request = Request(
+        registry_url,
+        method="GET",
+        headers={
+            "Accept": "text/plain",
+            "User-Agent": f"technocore-did-starter/{APP_VERSION}",
+        },
+    )
+    status, body = request_text(
+        request,
+        timeout,
+        accepted_http_errors=frozenset({404}),
+    )
+    result: dict[str, Any] = {
+        "did": did,
+        "fingerprint": fingerprint,
+        "registry_url": registry_url,
+    }
+    if status == 404:
+        result["state"] = "missing"
+        return result
+
+    lines = [
+        line.strip()
+        for line in body.rstrip("\r\n").splitlines()
+        if line.strip() and not line.startswith("# budget:")
+    ]
+    value = lines[-1] if lines else ""
+    result["value"] = value
+    result["state"] = "registered" if value == did else "conflict"
+    return result
+
+
+def register_did(
+    private_key: Ed25519PrivateKey,
+    *,
+    base_url: str = DEFAULT_BASE_URL,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Create the conventional public DID note once, then verify it by reading."""
+    did = did_from_private_key(private_key)
+    current = read_did_registration(did, base_url=base_url, timeout=timeout)
+    if current["state"] == "registered":
+        current["state"] = "already_registered"
+        return current
+    if current["state"] == "conflict":
+        raise NetworkError(
+            f"DID registry key {current['fingerprint']} contains a different value"
+        )
+
+    request_body = json.dumps(
+        {"value": did, "if_absent": True},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    request = Request(
+        current["registry_url"],
+        data=request_body,
+        method="POST",
+        headers={
+            "Accept": "text/plain",
+            "Content-Type": "application/json; charset=utf-8",
+            "User-Agent": f"technocore-did-starter/{APP_VERSION}",
+        },
+    )
+    status, body = request_text(
+        request,
+        timeout,
+        accepted_http_errors=frozenset({400, 409}),
+        is_write=True,
+    )
+    if status == 400 and "note limit reached" in body.lower():
+        return {
+            **current,
+            "state": "capacity_full",
+            "retryable": True,
+            "detail": terminal_safe_detail(body),
+        }
+    if status not in {200, 409}:
+        raise NetworkError(
+            f"Technocore rejected DID registration with HTTP {status}: "
+            f"{terminal_safe_detail(body)}"
+        )
+
+    verified = read_did_registration(did, base_url=base_url, timeout=timeout)
+    if verified["state"] != "registered":
+        raise NetworkError(
+            "Technocore DID note did not contain this DID after registration"
+        )
+    verified["state"] = "registered" if status == 200 else "already_registered"
+    return verified
+
+
 def validate_room_response(response: dict[str, Any], expected_room: str) -> None:
     """Require the stable room fields published by the Technocore API."""
     if response.get("room") != expected_room:
@@ -718,10 +886,35 @@ def _prompt_new_passphrase() -> str:
     return first
 
 
-def _add_shared_options(parser: argparse.ArgumentParser) -> None:
+def _add_shared_options(
+    parser: argparse.ArgumentParser,
+    *,
+    include_passphrase_file: bool = True,
+) -> None:
     parser.add_argument(
         "--key", type=Path, default=DEFAULT_KEY_PATH, help="identity PEM path"
     )
+    if include_passphrase_file:
+        parser.add_argument(
+            "--passphrase-file",
+            type=Path,
+            help="read the identity passphrase from a local file instead of prompting",
+        )
+
+
+def load_command_identity(args: argparse.Namespace) -> Ed25519PrivateKey:
+    """Load a command's identity without placing a passphrase on the command line."""
+    passphrase_file = getattr(args, "passphrase_file", None)
+    if passphrase_file is None:
+        return load_identity(args.key)
+    resolved = passphrase_file.expanduser().resolve()
+    try:
+        passphrase = resolved.read_bytes().rstrip(b"\r\n")
+    except OSError as error:
+        raise IdentityError(f"cannot read passphrase file {resolved}: {error}") from error
+    if not passphrase:
+        raise IdentityError(f"passphrase file is empty: {resolved}")
+    return load_identity(args.key, passphrase, allow_prompt=False)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -734,7 +927,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     init_parser = commands.add_parser("init", help="create one Ed25519 DID identity")
-    _add_shared_options(init_parser)
+    _add_shared_options(init_parser, include_passphrase_file=False)
 
     did_parser = commands.add_parser("did", help="print the public DID")
     _add_shared_options(did_parser)
@@ -761,6 +954,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     read_parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     read_parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
+
+    register_parser = commands.add_parser(
+        "register-did", help="idempotently publish this identity's conventional DID note"
+    )
+    _add_shared_options(register_parser)
+    register_parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    register_parser.add_argument(
+        "--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS
+    )
+    register_parser.add_argument(
+        "--output", type=Path, help="write verified registration evidence as new JSON"
+    )
+
+    status_parser = commands.add_parser(
+        "status", help="show the local DID and its public registry state"
+    )
+    _add_shared_options(status_parser)
+    status_parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    status_parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
 
     proof_parser = commands.add_parser(
         "proof", help="sign a public contribution revision"
@@ -859,7 +1071,7 @@ def run_command(args: argparse.Namespace) -> int:
         return 0
 
     if (
-        args.command == "proof"
+        args.command in {"proof", "register-did"}
         and args.output
         and args.output.expanduser().resolve().exists()
     ):
@@ -867,7 +1079,7 @@ def run_command(args: argparse.Namespace) -> int:
             f"refusing to overwrite existing file: {args.output.expanduser().resolve()}"
         )
 
-    private_key = load_identity(args.key)
+    private_key = load_command_identity(args)
     if args.command == "did":
         print(did_from_private_key(private_key))
         return 0
@@ -881,6 +1093,27 @@ def run_command(args: argparse.Namespace) -> int:
             timeout=args.timeout,
         )
         print(json.dumps(response, ensure_ascii=True, indent=2))
+        return 0
+    if args.command == "status":
+        status = read_did_registration(
+            did_from_private_key(private_key),
+            base_url=args.base_url,
+            timeout=args.timeout,
+        )
+        print(json.dumps(status, ensure_ascii=True, indent=2, sort_keys=True))
+        return 0
+    if args.command == "register-did":
+        registration = register_did(
+            private_key,
+            base_url=args.base_url,
+            timeout=args.timeout,
+        )
+        if registration["state"] == "capacity_full":
+            print(json.dumps(registration, ensure_ascii=True, indent=2, sort_keys=True))
+            return 75
+        if args.output:
+            write_new_json(args.output, registration)
+        print(json.dumps(registration, ensure_ascii=True, indent=2, sort_keys=True))
         return 0
     if args.command == "proof":
         proof = create_contribution_proof(private_key, args.artifact_url, args.commit)

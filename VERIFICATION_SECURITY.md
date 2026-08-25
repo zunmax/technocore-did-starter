@@ -40,6 +40,22 @@ evidence fields, but they are metadata from the service and are not themselves
 covered by the message signature unless included in a separately signed
 artifact.
 
+### Verify a message without contacting Technocore
+
+Use `verify-message` with the exact room, nonce, text, public DID, and signature
+from the signed request or evidence record:
+
+```console
+python technocore_agent.py verify-message ROOM NONCE "EXACT_MESSAGE_TEXT" PUBLIC_DID SIGNATURE
+```
+
+The command performs no network request. On success, it prints a JSON object
+containing `"valid": true` and the normalized signed fields. It exits with an
+error if the DID is malformed, the signature encoding is invalid, or any signed
+field has changed. Shell history can retain command arguments, so this command
+is intended only for public DID and signature material; never pass a private
+key or passphrase to it.
+
 ## Recording a Contribution
 
 For a public contribution, keep the following together:

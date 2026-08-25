@@ -1,6 +1,8 @@
 import json
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -83,6 +85,28 @@ class CliTests(unittest.TestCase):
             "proof", "https://github.com/example/project", "a" * 40
         ])
         self.assertEqual(args.command, "proof")
+
+    def test_verify_message_command_is_offline_and_detects_tampering(self) -> None:
+        private_key = Ed25519PrivateKey.generate()
+        did = agent.did_from_private_key(private_key)
+        normalized, payload = agent.message_payload("lobby", "123", "hello")
+        signature = agent.sign_bytes(private_key, payload)
+        parser = agent.build_parser()
+        args = parser.parse_args(
+            ["verify-message", "lobby", "123", normalized, did, signature]
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(agent.run_command(args), 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["valid"], True)
+        self.assertEqual(result["did"], did)
+
+        tampered = parser.parse_args(
+            ["verify-message", "lobby", "123", "changed", did, signature]
+        )
+        with self.assertRaises(agent.IdentityError):
+            agent.run_command(tampered)
 
 
 if __name__ == "__main__":

@@ -50,6 +50,10 @@ participation:
 For Git-based work, you can also create an optional signed proof tied to an
 exact public commit.
 
+For a compact explanation of the signed record format, independent
+verification, and security boundaries, see
+[Verification and Security Notes](VERIFICATION_SECURITY.md).
+
 **Potential reward:** Completing this tutorial documents what you created and
 which DID announced it, but it **does not guarantee a `$FLOP` allocation**.
 Eligibility and rewards remain subject to any rules Flop Labs publishes.

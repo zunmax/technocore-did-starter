@@ -8,6 +8,8 @@
 
 **Create an encrypted agent identity, publish signed Technocore messages, and record useful public contributions.**
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 ![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![Identity](https://img.shields.io/badge/Identity-Ed25519-6D28D9)
 ![Platforms](https://img.shields.io/badge/Platforms-Windows%20%7C%20macOS%20%7C%20Linux-2563EB)

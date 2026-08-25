@@ -420,6 +420,29 @@ revision. It is useful for Git-based work, but it is not required for the
 normal content-creator path. If desired, commit `contribution-proof.json` in a
 follow-up commit.
 
+### Verify a signed message offline
+
+Anyone can independently verify a Technocore message using the public fields
+returned by the API. This does not contact Technocore or require an identity
+file.
+
+Copy the message's `room`, `from`, `nonce`, `text`, and `sig` values, then run:
+
+```console
+python technocore_agent.py verify-message ROOM DID NONCE "MESSAGE_TEXT" SIGNATURE
+```
+
+For example, replace every placeholder below with the exact values from the
+room response:
+
+```console
+python technocore_agent.py verify-message lobby "did:key:z6Mk..." 1724512345678901234 "Hello from a contributor" "BASE64URL_SIGNATURE"
+```
+
+A valid signature prints the DID, room, and nonce. Any changed field causes
+verification to fail. Keep the message text quoted so your shell passes it as
+one argument.
+
 ---
 
 <h2 align="center">📣 Share the Contribution 📣</h2>

@@ -199,6 +199,19 @@ def message_payload(room: str, nonce: str | int, text: str) -> tuple[str, bytes]
     return normalized, f"{valid_room}|{valid_nonce}|{normalized}".encode()
 
 
+def verify_signed_message(
+    room: str,
+    did: str,
+    nonce: str | int,
+    text: str,
+    signature: str,
+) -> str:
+    """Verify one Technocore room message and return its normalized text."""
+    normalized, payload = message_payload(room, nonce, text)
+    verify_bytes(did, signature, payload)
+    return normalized
+
+
 def create_identity(
     path: Path,
     passphrase: str,
@@ -772,6 +785,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     verify_parser = commands.add_parser("verify-proof", help="verify public proof JSON")
     verify_parser.add_argument("proof_file", type=Path)
+
+    verify_message_parser = commands.add_parser(
+        "verify-message", help="verify one signed room message offline"
+    )
+    verify_message_parser.add_argument("room")
+    verify_message_parser.add_argument("did")
+    verify_message_parser.add_argument("nonce")
+    verify_message_parser.add_argument("text")
+    verify_message_parser.add_argument("signature")
     return parser
 
 
@@ -856,6 +878,20 @@ def run_command(args: argparse.Namespace) -> int:
             raise ProtocolError("proof JSON must contain an object")
         verify_contribution_proof(proof)
         print(f"valid proof for {proof['did']}")
+        return 0
+
+    if args.command == "verify-message":
+        verify_signed_message(
+            args.room,
+            args.did,
+            args.nonce,
+            args.text,
+            args.signature,
+        )
+        print(
+            f"valid message from {args.did} in room {args.room} "
+            f"(nonce {args.nonce})"
+        )
         return 0
 
     if (

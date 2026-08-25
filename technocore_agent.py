@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import getpass
 import json
 import math
@@ -184,7 +185,10 @@ def verify_bytes(did: str, signature: str, payload: bytes) -> None:
     """Verify a base64url Ed25519 signature against a did:key."""
     if SIGNATURE_PATTERN.fullmatch(signature or "") is None:
         raise ProtocolError("signature must contain 86 unpadded base64url characters")
-    raw_signature = base64.urlsafe_b64decode(signature + "==")
+    try:
+        raw_signature = base64.urlsafe_b64decode(signature + "==")
+    except (binascii.Error, ValueError) as error:
+        raise ProtocolError("signature is not valid base64url") from error
     try:
         public_key_from_did(did).verify(raw_signature, payload)
     except InvalidSignature as error:
@@ -661,6 +665,8 @@ def create_contribution_proof(
 
 def verify_contribution_proof(proof: dict[str, Any]) -> None:
     """Validate a contribution proof's shape and Ed25519 signature."""
+    if not isinstance(proof, dict):
+        raise ProtocolError("contribution proof must be a JSON object")
     if proof.get("schema") != "technocore-contribution-proof-v1":
         raise ProtocolError("unsupported contribution proof schema")
     required = ("did", "artifact_url", "commit", "signature")
@@ -772,6 +778,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     verify_parser = commands.add_parser("verify-proof", help="verify public proof JSON")
     verify_parser.add_argument("proof_file", type=Path)
+
+    message_verify_parser = commands.add_parser(
+        "verify-message", help="verify one signed Technocore message offline"
+    )
+    message_verify_parser.add_argument("room")
+    message_verify_parser.add_argument("nonce")
+    message_verify_parser.add_argument("text")
+    message_verify_parser.add_argument("did")
+    message_verify_parser.add_argument("signature")
     return parser
 
 
@@ -856,6 +871,24 @@ def run_command(args: argparse.Namespace) -> int:
             raise ProtocolError("proof JSON must contain an object")
         verify_contribution_proof(proof)
         print(f"valid proof for {proof['did']}")
+        return 0
+
+    if args.command == "verify-message":
+        normalized, payload = message_payload(args.room, args.nonce, args.text)
+        verify_bytes(args.did, args.signature, payload)
+        print(
+            json.dumps(
+                {
+                    "valid": True,
+                    "did": args.did,
+                    "room": validate_name(args.room),
+                    "nonce": validate_nonce(args.nonce),
+                    "text": normalized,
+                },
+                ensure_ascii=True,
+                indent=2,
+            )
+        )
         return 0
 
     if (

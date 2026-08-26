@@ -28,6 +28,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 APP_VERSION = "1.0.0"
+MESSAGE_RECEIPT_SCHEMA = "technocore-message-receipt-v1"
 DEFAULT_BASE_URL = "https://technocore.chat"
 DEFAULT_KEY_PATH = Path("identity.pem")
 DEFAULT_TIMEOUT_SECONDS = 20.0
@@ -445,23 +446,62 @@ def validate_room_response(response: dict[str, Any], expected_room: str) -> None
         raise NetworkError("Technocore returned an invalid messages list")
 
 
+def create_message_receipt(
+    private_key: Ed25519PrivateKey,
+    room: str,
+    text: str,
+    *,
+    nonce: str | int | None = None,
+) -> dict[str, str]:
+    """Create a portable receipt for the exact signed message envelope."""
+    selected_nonce = validate_nonce(nonce if nonce is not None else next_nonce())
+    normalized, payload = message_payload(room, selected_nonce, text)
+    return {
+        "schema": MESSAGE_RECEIPT_SCHEMA,
+        "did": did_from_private_key(private_key),
+        "room": validate_name(room),
+        "nonce": selected_nonce,
+        "text": normalized,
+        "signature": sign_bytes(private_key, payload),
+    }
+
+
+def verify_message_receipt(receipt: dict[str, Any]) -> None:
+    """Verify a portable signed-message receipt entirely offline."""
+    if receipt.get("schema") != MESSAGE_RECEIPT_SCHEMA:
+        raise ProtocolError("unsupported message receipt schema")
+    required = ("did", "room", "nonce", "text", "signature")
+    if any(not isinstance(receipt.get(field), str) for field in required):
+        raise ProtocolError("message receipt is missing required string fields")
+    normalized, payload = message_payload(
+        receipt["room"], receipt["nonce"], receipt["text"]
+    )
+    if normalized != receipt["text"]:
+        raise ProtocolError("message receipt text must already be normalized")
+    verify_bytes(receipt["did"], receipt["signature"], payload)
+
+
 def post_signed_message(
     private_key: Ed25519PrivateKey,
     room: str,
     text: str,
     *,
     nonce: str | int | None = None,
+    receipt_path: Path | None = None,
     base_url: str = DEFAULT_BASE_URL,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    """Normalize, sign, and POST one message without automatic retries."""
-    selected_nonce = validate_nonce(nonce if nonce is not None else next_nonce())
-    normalized, payload = message_payload(room, selected_nonce, text)
-    did = did_from_private_key(private_key)
+    """Sign and POST once, optionally preserving the envelope before the request."""
+    receipt = create_message_receipt(private_key, room, text, nonce=nonce)
+    if receipt_path is not None:
+        write_new_json(receipt_path, receipt)
+    selected_nonce = receipt["nonce"]
+    normalized = receipt["text"]
+    did = receipt["did"]
     request_body = json.dumps(
         {
             "did": did,
-            "sig": sign_bytes(private_key, payload),
+            "sig": receipt["signature"],
             "nonce": selected_nonce,
             "text": normalized,
         },
@@ -671,7 +711,7 @@ def verify_contribution_proof(proof: dict[str, Any]) -> None:
 
 
 def write_new_json(path: Path, payload: dict[str, Any]) -> None:
-    """Write public proof JSON without overwriting an existing file."""
+    """Write a public JSON artifact without overwriting an existing file."""
     resolved = path.expanduser().resolve()
     serialized = (
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
@@ -702,7 +742,7 @@ def write_new_json(path: Path, payload: dict[str, Any]) -> None:
                 resolved.unlink(missing_ok=True)
             except OSError:
                 cleanup_failed = True
-        detail = f"cannot write proof file {resolved}: {error}"
+        detail = f"cannot write JSON file {resolved}: {error}"
         if cleanup_failed:
             detail += f"; remove the incomplete file manually: {resolved}"
         raise LocalFileError(detail) from error
@@ -746,6 +786,11 @@ def build_parser() -> argparse.ArgumentParser:
     say_parser.add_argument(
         "--nonce", help="advanced recovery override; 1-19 ASCII digits"
     )
+    say_parser.add_argument(
+        "--receipt",
+        type=Path,
+        help="write the signed envelope before posting; refuses to overwrite",
+    )
     say_parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     say_parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
 
@@ -772,6 +817,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     verify_parser = commands.add_parser("verify-proof", help="verify public proof JSON")
     verify_parser.add_argument("proof_file", type=Path)
+
+    receipt_parser = commands.add_parser(
+        "verify-message-receipt", help="verify a portable signed-message receipt"
+    )
+    receipt_parser.add_argument("receipt_file", type=Path)
     return parser
 
 
@@ -858,6 +908,20 @@ def run_command(args: argparse.Namespace) -> int:
         print(f"valid proof for {proof['did']}")
         return 0
 
+    if args.command == "verify-message-receipt":
+        receipt_path = args.receipt_file.expanduser().resolve()
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise LocalFileError(
+                f"cannot read message receipt JSON: {error}"
+            ) from error
+        if not isinstance(receipt, dict):
+            raise ProtocolError("message receipt JSON must contain an object")
+        verify_message_receipt(receipt)
+        print(f"valid message receipt for {receipt['did']}")
+        return 0
+
     if (
         args.command == "proof"
         and args.output
@@ -865,6 +929,14 @@ def run_command(args: argparse.Namespace) -> int:
     ):
         raise LocalFileError(
             f"refusing to overwrite existing file: {args.output.expanduser().resolve()}"
+        )
+    if (
+        args.command == "say"
+        and args.receipt
+        and args.receipt.expanduser().resolve().exists()
+    ):
+        raise LocalFileError(
+            f"refusing to overwrite existing file: {args.receipt.expanduser().resolve()}"
         )
 
     private_key = load_identity(args.key)
@@ -877,6 +949,7 @@ def run_command(args: argparse.Namespace) -> int:
             args.room,
             args.text,
             nonce=args.nonce,
+            receipt_path=args.receipt,
             base_url=args.base_url,
             timeout=args.timeout,
         )

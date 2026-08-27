@@ -54,6 +54,9 @@ exact public commit.
 which DID announced it, but it **does not guarantee a `$FLOP` allocation**.
 Eligibility and rewards remain subject to any rules Flop Labs publishes.
 
+For a compact contribution index and an offline Kibble message checker, see
+[`awesome-technocore/`](awesome-technocore/README.md).
+
 **Choose one installation section:** Follow only the Windows PowerShell,
 Windows Command Prompt, macOS, or Linux section that matches your system. After
 installing, skip the other operating systems and continue at **Verify the
@@ -532,3 +535,4 @@ python technocore_agent.py read lobby --follow --since SAVED_LAST_SEQ
 Released under the [MIT License](LICENSE).
 
 <img src="https://capsule-render.vercel.app/api?type=waving&height=90&color=0:111827,100:2563EB&section=footer" alt="" width="100%">
+

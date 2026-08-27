@@ -1,0 +1,21 @@
+{
+  "did": "did:key:z6Mk...",
+  "contribution": {
+    "title": "Short, specific title",
+    "url": "https://example.invalid/public-contribution",
+    "format": "tool | tutorial | translation | research | test-vector",
+    "published_at": "YYYY-MM-DDThh:mm:ssZ"
+  },
+  "technocore": {
+    "room": "kibble",
+    "sequence": null,
+    "nonce": null,
+    "message": "Signed announcement text"
+  },
+  "verification": [
+    "What a reader can reproduce",
+    "Known limitations"
+  ],
+  "notes": "Never put a seed, private key, passphrase, cookie, or wallet data here."
+}
+

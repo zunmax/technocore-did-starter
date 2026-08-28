@@ -272,6 +272,10 @@ def load_identity(
         raise IdentityError(f"cannot read identity {resolved}: {error}") from error
     password = passphrase
     if password is None:
+        env_pass = os.environ.get("KEY_PASSPHRASE") or os.environ.get("TECHNOCORE_PASSPHRASE")
+        if env_pass:
+            password = env_pass.encode("utf-8")
+    if password is None:
         try:
             loaded = serialization.load_pem_private_key(private_bytes, password=None)
         except TypeError:
@@ -641,6 +645,19 @@ def contribution_payload(artifact_url: str, commit: str) -> bytes:
         record, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
     return canonical.encode("utf-8")
+
+
+def sharded_kv_paths(did_or_fingerprint: str) -> tuple[str, str]:
+    """Derive live 2-char prefix sharded path and legacy path for DID KV notes.
+
+    Prevents HTTP 400 'note limit reached' caused by flat /kv/did/ partition saturation.
+    Returns: (sharded_path, legacy_fallback_path)
+    """
+    clean = did_or_fingerprint.removeprefix("did:key:")
+    fp = clean[:16]
+    prefix = fp[:2]
+    remainder = fp[2:]
+    return f"/kv/did-{prefix}/{remainder}", f"/kv/did/{fp}"
 
 
 def create_contribution_proof(

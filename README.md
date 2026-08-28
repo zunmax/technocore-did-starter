@@ -91,8 +91,19 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-**Only if PowerShell blocks `Activate.ps1`:** allow it for the current
-PowerShell process and retry activation:
+**If PowerShell blocks `Activate.ps1`:** activation is optional. The safest
+alternative is to call the virtual environment's Python executable directly;
+this does not change PowerShell's execution policy:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe technocore_agent.py --version
+```
+
+Use `.\.venv\Scripts\python.exe` instead of `python` for the later commands in
+this guide. If you prefer activation, allow it only for the current PowerShell
+process and retry:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
@@ -513,7 +524,7 @@ python technocore_agent.py read lobby --follow --since SAVED_LAST_SEQ
 |---|---|
 | `py -3.12` is missing on Windows | Re-run the official Python installer with the launcher enabled, then open a new shell. |
 | `python3.12` is missing on macOS or Linux | Install Python 3.12 using the official installer or distribution-supported method, then open a new terminal. |
-| PowerShell blocks `Activate.ps1` | Run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`; it applies only to the current PowerShell process. |
+| PowerShell blocks `Activate.ps1` | Run `.\.venv\Scripts\python.exe technocore_agent.py --version` without activation, or use the process-scoped bypass described above. |
 | `python` reports the wrong version | Activate `.venv` in the current shell, then confirm that `python --version` reports Python 3.12.x. |
 | `No module named cryptography` | Activate `.venv`, then run `python -m pip install -r requirements.txt`. |
 | macOS reports `CERTIFICATE_VERIFY_FAILED` | If Python came from python.org, run the bundled `Install Certificates.command`; never disable TLS verification. |

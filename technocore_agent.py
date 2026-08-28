@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import stat
 import sys
 import time
 import unicodedata
@@ -266,6 +267,16 @@ def load_identity(
 ) -> Ed25519PrivateKey:
     """Load an Ed25519 identity, prompting only when an encrypted key requires it."""
     resolved = path.expanduser().resolve()
+    try:
+        mode = resolved.stat().st_mode
+        if mode & (stat.S_IRWXG | stat.S_IRWXO):
+            sys.stderr.write(
+                "warning: " + str(resolved) + " is readable or writable by "
+                "group/other (mode " + oct(mode & 0o777) + "); consider "
+                "running: chmod 600 " + str(resolved) + "\n"
+            )
+    except OSError:
+        pass
     try:
         private_bytes = resolved.read_bytes()
     except OSError as error:

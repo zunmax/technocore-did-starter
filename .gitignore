@@ -13,3 +13,15 @@ __pycache__/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Private/local files
+identity.pem
+passphrase.txt
+.live_cursor.json
+cron.log
+dashboard/dashboard.json
+leaderboard/scores.json
+monitor/state.json
+notifier/.keyword_cursor.json
+proof/*.zip
+proof/20*/

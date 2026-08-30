@@ -90,6 +90,7 @@ py -3.12 -m venv .venv
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
+> **If `py -3.12` fails with "No suitable Python runtime found":** you don't have Python 3.12 installed. Use `python -m venv .venv` instead of the line above — any Python 3.11+ works fine for this tool.
 
 **Only if PowerShell blocks `Activate.ps1`:** allow it for the current
 PowerShell process and retry activation:
@@ -122,6 +123,7 @@ py -3.12 -m venv .venv
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
+> **If `py -3.12` fails with "No suitable Python runtime found":** you don't have Python 3.12 installed. Use `python -m venv .venv` instead of the line above — any Python 3.11+ works fine for this tool.
 
 ---
 

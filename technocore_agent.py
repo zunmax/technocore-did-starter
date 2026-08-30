@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import stat
 import sys
 import time
 import unicodedata
@@ -266,6 +267,25 @@ def load_identity(
 ) -> Ed25519PrivateKey:
     """Load an Ed25519 identity, prompting only when an encrypted key requires it."""
     resolved = path.expanduser().resolve()
+    try:
+        # POSIX mode bits are only meaningful on POSIX filesystems. Windows
+        # (os.name == "nt") synthesizes S_IRWXG/S_IRWXO from its own ACL in a
+        # way that does not reflect real group/other access, so this check
+        # would false-positive on every normal Windows identity file and
+        # recommend chmod, which does not apply there. A Windows-specific
+        # ACL-aware check would need to inspect the file's DACL instead --
+        # not implemented here, so this simply skips the check on Windows
+        # rather than warn incorrectly.
+        if os.name != "nt":
+            mode = resolved.stat().st_mode
+            if mode & (stat.S_IRWXG | stat.S_IRWXO):
+                sys.stderr.write(
+                    "warning: " + str(resolved) + " is readable or writable by "
+                    "group/other (mode " + oct(mode & 0o777) + "); consider "
+                    "running: chmod 600 " + str(resolved) + "\n"
+                )
+    except OSError:
+        pass
     try:
         private_bytes = resolved.read_bytes()
     except OSError as error:

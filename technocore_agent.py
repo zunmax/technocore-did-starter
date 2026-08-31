@@ -185,6 +185,11 @@ def verify_bytes(did: str, signature: str, payload: bytes) -> None:
     if SIGNATURE_PATTERN.fullmatch(signature or "") is None:
         raise ProtocolError("signature must contain 86 unpadded base64url characters")
     raw_signature = base64.urlsafe_b64decode(signature + "==")
+    canonical_signature = (
+        base64.urlsafe_b64encode(raw_signature).decode("ascii").rstrip("=")
+    )
+    if canonical_signature != signature:
+        raise ProtocolError("signature must use canonical unpadded base64url encoding")
     try:
         public_key_from_did(did).verify(raw_signature, payload)
     except InvalidSignature as error:

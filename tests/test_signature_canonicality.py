@@ -20,6 +20,15 @@ class SignatureCanonicalityTests(unittest.TestCase):
         ):
             verify_bytes(self.DID, self.SIGNATURE + "==", self.PAYLOAD)
 
+    def test_rejects_noncanonical_trailing_bit_aliases(self) -> None:
+        for final_character in "RST":
+            with self.subTest(final_character=final_character):
+                aliased_signature = self.SIGNATURE[:-1] + final_character
+                with self.assertRaisesRegex(
+                    ProtocolError, "canonical unpadded base64url encoding"
+                ):
+                    verify_bytes(self.DID, aliased_signature, self.PAYLOAD)
+
 
 if __name__ == "__main__":
     unittest.main()

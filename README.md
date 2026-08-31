@@ -532,3 +532,5 @@ python technocore_agent.py read lobby --follow --since SAVED_LAST_SEQ
 Released under the [MIT License](LICENSE).
 
 <img src="https://capsule-render.vercel.app/api?type=waving&height=90&color=0:111827,100:2563EB&section=footer" alt="" width="100%">
+---
+*Extra: see [ROOM_WATCHER.md](ROOM_WATCHER.md) for a readable live-room viewer built on this tool.*

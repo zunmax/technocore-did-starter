@@ -5,6 +5,7 @@ import json
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.client import IncompleteRead
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import call, patch
@@ -29,8 +30,37 @@ class _Response:
         return self.body if limit < 0 else self.body[:limit]
 
 
-class _RedirectHandler(BaseHTTPRequestHandler):
+class _BrokenResponse(_Response):
+    def read(self, limit: int = -1) -> bytes:
+        raise IncompleteRead(b"partial")
+
+
+class _BrokenErrorResponse(HTTPError):
+    def read(self, limit: int = -1) -> bytes:
+        raise IncompleteRead(b"partial")
+
+
+class _MalformedRedirectHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
+        self.send_response(302)
+        self.send_header("Location", "http://[::1")
+        self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:
+        return None
+
+
+class _RedirectHandler(BaseHTTPRequestHandler):
+    target_hits = 0
+
+    def do_GET(self) -> None:
+        if self.path == "/target":
+            type(self).target_hits += 1
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{}")
+            return
         self.send_response(302)
         self.send_header("Location", "/target")
         self.end_headers()
@@ -104,6 +134,14 @@ class URLAndInputBoundaryTests(unittest.TestCase):
             agent.validate_base_url("http://127.0.0.1:8080/"),
             "http://127.0.0.1:8080",
         )
+        self.assertEqual(
+            agent.validate_base_url("http://[0:0:0:0:0:0:0:1]:8080/"),
+            "http://[0:0:0:0:0:0:0:1]:8080",
+        )
+
+    def test_noncanonical_nonce_is_rejected_before_signing(self) -> None:
+        with self.assertRaises(agent.ProtocolError):
+            agent.validate_nonce("0123")
 
     def test_empty_host_is_rejected_for_base_and_artifact_urls(self) -> None:
         for value in ("https://", "https:///path"):
@@ -162,7 +200,23 @@ class URLAndInputBoundaryTests(unittest.TestCase):
 
 class NetworkBoundaryTests(unittest.TestCase):
     def test_redirect_is_not_followed(self) -> None:
+        _RedirectHandler.target_hits = 0
         server = ThreadingHTTPServer(("127.0.0.1", 0), _RedirectHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            request = Request(f"http://127.0.0.1:{server.server_port}/start")
+            with self.assertRaises(agent.NetworkError) as context:
+                agent.request_json(request, 2)
+            self.assertIn("HTTP 302", str(context.exception))
+            self.assertEqual(_RedirectHandler.target_hits, 0)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_malformed_redirect_is_network_error(self) -> None:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _MalformedRedirectHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
@@ -196,8 +250,38 @@ class NetworkBoundaryTests(unittest.TestCase):
 
     def test_huge_json_number_is_network_error(self) -> None:
         request = Request("https://example.com")
-        huge_number = ("{\\\"value\\\":" + ("9" * 10000) + "}").encode()
+        huge_number = ('{"value":' + ("9" * 10000) + '}').encode()
         with patch.object(agent, "urlopen", return_value=_Response(huge_number)):
+            with self.assertRaises(agent.NetworkError):
+                agent.request_json(request, 2)
+
+    def test_broken_response_stream_is_network_error(self) -> None:
+        request = Request("https://example.com")
+        with patch.object(agent, "urlopen", return_value=_BrokenResponse(b"partial")):
+            with self.assertRaises(agent.NetworkError):
+                agent.request_json(request, 2)
+
+    def test_broken_http_error_body_is_network_error(self) -> None:
+        request = Request("https://example.com")
+        error = _BrokenErrorResponse(
+            request.full_url,
+            502,
+            "bad gateway",
+            {},
+            None,
+        )
+        with patch.object(agent, "urlopen", side_effect=error):
+            with self.assertRaises(agent.NetworkError) as context:
+                agent.request_json(request, 2)
+        self.assertIn("error response could not be read", str(context.exception))
+
+    def test_nonstandard_json_constant_is_network_error(self) -> None:
+        request = Request("https://example.com")
+        with patch.object(
+            agent,
+            "urlopen",
+            return_value=_Response(b'{"value":NaN}'),
+        ):
             with self.assertRaises(agent.NetworkError):
                 agent.request_json(request, 2)
 
@@ -261,6 +345,13 @@ class ProofFileTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "proof.json"
             path.write_text('{"value":' + "9" * 10000 + "}", encoding="utf-8")
+            with self.assertRaises(agent.LocalFileError):
+                self._verify_path(path)
+
+    def test_proof_file_nonstandard_json_constant_is_local_file_error(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "proof.json"
+            path.write_text('{"value":NaN}', encoding="utf-8")
             with self.assertRaises(agent.LocalFileError):
                 self._verify_path(path)
 

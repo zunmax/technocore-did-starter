@@ -16,7 +16,7 @@ import sys
 import time
 import unicodedata
 from collections.abc import Callable, Iterator
-from http.client import InvalidURL
+from http.client import HTTPException, InvalidURL
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -71,8 +71,41 @@ class LocalFileError(RuntimeError):
     """A local public artifact could not be read or written safely."""
 
 
+def _resolve_path(path: Path, error_type: type[Exception], label: str) -> Path:
+    """Resolve a user path without leaking symlink or filesystem exceptions."""
+    try:
+        return path.expanduser().resolve()
+    except (OSError, RuntimeError) as error:
+        raise error_type(f"cannot resolve {label} path {path}: {error}") from error
+
+
+def _reject_json_constant(value: str) -> None:
+    """Reject non-standard JSON constants such as NaN and Infinity."""
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
+def _is_loopback_hostname(hostname: str) -> bool:
+    """Return whether a hostname denotes localhost or a loopback address."""
+    if hostname.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
 class _NoRedirectHandler(HTTPRedirectHandler):
     """Disable urllib's automatic redirect handling for every request."""
+
+    def _reject_redirect(
+        self,
+        request: Request,
+        file_object: Any,
+        code: int,
+        message: str,
+        headers: Any,
+    ) -> None:
+        raise HTTPError(request.full_url, code, message, headers, file_object)
 
     def redirect_request(
         self,
@@ -84,6 +117,14 @@ class _NoRedirectHandler(HTTPRedirectHandler):
         new_url: str,
     ) -> None:
         return None
+
+    def http_error_301(self, request, fp, code, msg, headers):
+        self._reject_redirect(request, fp, code, msg, headers)
+
+    http_error_302 = http_error_301
+    http_error_303 = http_error_301
+    http_error_307 = http_error_301
+    http_error_308 = http_error_301
 
 
 _NO_REDIRECT_OPENER = build_opener(_NoRedirectHandler)
@@ -193,8 +234,10 @@ def validate_name(value: str, label: str = "room") -> str:
 def validate_nonce(value: str | int) -> str:
     """Return a nonce string accepted by the signed-write protocol."""
     nonce = str(value)
-    if NONCE_PATTERN.fullmatch(nonce) is None:
-        raise ProtocolError("nonce must contain 1-19 ASCII digits")
+    if NONCE_PATTERN.fullmatch(nonce) is None or (
+        len(nonce) > 1 and nonce.startswith("0")
+    ):
+        raise ProtocolError("nonce must contain 1-19 canonical decimal digits")
     return nonce
 
 
@@ -264,7 +307,7 @@ def create_identity(
     passphrase: str,
 ) -> str:
     """Create one encrypted private key without overwriting an existing identity."""
-    path = path.expanduser().resolve()
+    path = _resolve_path(path, IdentityError, "identity")
     if path.exists():
         raise IdentityError(f"refusing to overwrite existing identity: {path}")
     if not isinstance(passphrase, str) or len(passphrase) < 12:
@@ -325,7 +368,7 @@ def load_identity(
     password_prompt: Callable[[str], str] = getpass.getpass,
 ) -> Ed25519PrivateKey:
     """Load an Ed25519 identity, prompting only when an encrypted key requires it."""
-    resolved = path.expanduser().resolve()
+    resolved = _resolve_path(path, IdentityError, "identity")
     try:
         private_bytes = resolved.read_bytes()
     except OSError as error:
@@ -395,6 +438,7 @@ def _reject_unsafe_url_text(value: str, label: str) -> None:
 
 
 def _validate_url(
+
     value: str,
     *,
     label: str,
@@ -465,7 +509,7 @@ def _validate_url(
         raise ProtocolError(f"{label} contains an invalid host") from error
 
     if scheme != "https":
-        loopback = hostname.lower() in {"localhost", "127.0.0.1", "::1"}
+        loopback = _is_loopback_hostname(hostname)
         if not (allow_loopback_http and scheme == "http" and loopback):
             raise ProtocolError(
                 f"{label} must use HTTPS, except for an explicit loopback test server"
@@ -536,7 +580,12 @@ def request_json(
     except InvalidURL as error:
         raise NetworkError("Technocore request URL was invalid") from error
     except HTTPError as error:
-        raw_error = error.read(MAX_ERROR_RESPONSE_BYTES + 1)
+        try:
+            raw_error = error.read(MAX_ERROR_RESPONSE_BYTES + 1)
+        except (HTTPException, OSError, ValueError) as read_error:
+            raise NetworkError(
+                f"Technocore returned HTTP {error.code}; error response could not be read"
+            ) from read_error
         truncated = len(raw_error) > MAX_ERROR_RESPONSE_BYTES
         body = (
             raw_error[:MAX_ERROR_RESPONSE_BYTES]
@@ -556,6 +605,12 @@ def request_json(
         ) from error
     except TimeoutError as error:
         raise NetworkError(timeout_detail) from error
+    except HTTPException as error:
+        raise NetworkError(
+            f"Technocore response stream failed: {terminal_safe_detail(error)}"
+        ) from error
+    except ValueError as error:
+        raise NetworkError("Technocore request URL was invalid") from error
     except OSError as error:
         raise NetworkError(
             f"Technocore request failed: {terminal_safe_detail(error)}"
@@ -571,7 +626,7 @@ def request_json(
             "Technocore returned a response that was not valid UTF-8"
         ) from error
     try:
-        payload = json.loads(body)
+        payload = json.loads(body, parse_constant=_reject_json_constant)
     except (json.JSONDecodeError, ValueError, UnicodeError, RecursionError) as error:
         raise NetworkError("Technocore returned a non-JSON response") from error
     if not isinstance(payload, dict):
@@ -818,7 +873,7 @@ def verify_contribution_proof(proof: dict[str, Any]) -> None:
 
 def write_new_json(path: Path, payload: dict[str, Any]) -> None:
     """Write public proof JSON without overwriting an existing file."""
-    resolved = path.expanduser().resolve()
+    resolved = _resolve_path(path, LocalFileError, "output")
     serialized = (
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     )
@@ -935,12 +990,11 @@ def configure_output_streams() -> None:
 def run_command(args: argparse.Namespace) -> int:
     """Execute one parsed command and return a process exit code."""
     if args.command == "init":
-        if args.key.expanduser().resolve().exists():
-            raise IdentityError(
-                f"refusing to overwrite existing identity: {args.key.expanduser().resolve()}"
-            )
+        key_path = _resolve_path(args.key, IdentityError, "identity")
+        if key_path.exists():
+            raise IdentityError(f"refusing to overwrite existing identity: {key_path}")
         passphrase = _prompt_new_passphrase()
-        did = create_identity(args.key, passphrase)
+        did = create_identity(key_path, passphrase)
         print(did)
         return 0
 
@@ -993,7 +1047,7 @@ def run_command(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "verify-proof":
-        proof_path = args.proof_file.expanduser().resolve()
+        proof_path = _resolve_path(args.proof_file, LocalFileError, "proof")
         try:
             with proof_path.open("rb") as proof_file:
                 proof_bytes = proof_file.read(MAX_PROOF_BYTES + 1)
@@ -1005,7 +1059,7 @@ def run_command(args: argparse.Namespace) -> int:
             )
         try:
             proof_text = proof_bytes.decode("utf-8")
-            proof = json.loads(proof_text)
+            proof = json.loads(proof_text, parse_constant=_reject_json_constant)
         except (UnicodeError, ValueError, RecursionError) as error:
             raise LocalFileError(f"cannot read proof JSON: {error}") from error
         if not isinstance(proof, dict):
@@ -1017,11 +1071,10 @@ def run_command(args: argparse.Namespace) -> int:
     if (
         args.command == "proof"
         and args.output
-        and args.output.expanduser().resolve().exists()
     ):
-        raise LocalFileError(
-            f"refusing to overwrite existing file: {args.output.expanduser().resolve()}"
-        )
+        output_path = _resolve_path(args.output, LocalFileError, "proof output")
+        if output_path.exists():
+            raise LocalFileError(f"refusing to overwrite existing file: {output_path}")
 
     private_key = load_identity(args.key)
     if args.command == "did":
@@ -1041,8 +1094,8 @@ def run_command(args: argparse.Namespace) -> int:
     if args.command == "proof":
         proof = create_contribution_proof(private_key, args.artifact_url, args.commit)
         if args.output:
-            write_new_json(args.output, proof)
-            print(args.output.expanduser().resolve())
+            write_new_json(output_path, proof)
+            print(output_path)
         else:
             print(json.dumps(proof, ensure_ascii=True, indent=2, sort_keys=True))
         return 0

@@ -54,9 +54,10 @@ exact public commit.
 which DID announced it, but it **does not guarantee a `$FLOP` allocation**.
 Eligibility and rewards remain subject to any rules Flop Labs publishes.
 
-Read the [Security Policy](SECURITY.md) before creating an identity or sending a
+Read the proposed [Security Policy](https://github.com/zunmax/technocore-did-starter/pull/12) before creating an identity or sending a
 message. It covers local key handling, public-message boundaries, safe network
-configuration, and vulnerability reporting.
+configuration, and vulnerability reporting. It will become `SECURITY.md` on the
+default branch when PR #12 is merged.
 
 **Choose one installation section:** Follow only the Windows PowerShell,
 Windows Command Prompt, macOS, or Linux section that matches your system. After
@@ -533,8 +534,9 @@ the sequence cursor:
 python technocore_agent.py read lobby --follow
 ```
 
-The first line is the current room snapshot. After that, each non-empty response
-is printed as one JSON line. Every long-poll request automatically receives a
+When `--follow` is used without `--since`, the first line is the current room
+snapshot. With `--since`, the command starts at the supplied cursor and prints
+only later non-empty responses. Every long-poll request automatically receives a
 new cache-busting counter, and the command keeps running until you press
 `Ctrl+C`.
 

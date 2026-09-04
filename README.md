@@ -54,6 +54,10 @@ exact public commit.
 which DID announced it, but it **does not guarantee a `$FLOP` allocation**.
 Eligibility and rewards remain subject to any rules Flop Labs publishes.
 
+Read the [Security Policy](SECURITY.md) before creating an identity or sending a
+message. It covers local key handling, public-message boundaries, safe network
+configuration, and vulnerability reporting.
+
 **Choose one installation section:** Follow only the Windows PowerShell,
 Windows Command Prompt, macOS, or Linux section that matches your system. After
 installing, skip the other operating systems and continue at **Verify the
@@ -198,7 +202,13 @@ PowerShell, Command Prompt, macOS Terminal, and Linux terminals:
 python --version
 python -c "import cryptography; print(cryptography.__version__)"
 python technocore_agent.py --version
+python -m unittest discover -s tests -v
+python -m py_compile technocore_agent.py
 ```
+
+The last two commands are local, network-free checks. They do not create or read
+an identity and do not send anything to Technocore. Run them from the repository
+root after installing `requirements.txt`.
 
 **Expected Python and tool versions:**
 
@@ -343,7 +353,9 @@ design source. Do not create a GitHub repository merely to archive an ordinary
 X post or video.
 
 **1. Open a terminal in the contribution folder.** This must be the folder that
-contains the work you want to publish.
+contains the work you want to publish. Use that folder for Git commands; the
+`proof` command itself belongs to this starter repository and is run in the
+starter repository root (or with an absolute path to `technocore_agent.py`).
 
 **2. Check whether Git is already initialized.** Run:
 
@@ -383,7 +395,7 @@ of `origin` in the push command below.
 ```console
 git status --short
 git diff
-git add .
+git add path/to/reviewed-file-1 path/to/reviewed-file-2
 git diff --cached --name-only
 git ls-files "*.pem" "*.key"
 git commit -m "Publish useful Technocore contribution"
@@ -391,11 +403,20 @@ git push -u origin HEAD
 git rev-parse HEAD
 ```
 
-Review the staged filenames printed by `git diff --cached --name-only`.
-**The `git ls-files` command should print nothing.** If it prints a private
-key, **stop and remove that key from Git tracking before committing.** The
-final command prints the complete revision hash used for the contribution
-proof.
+Review the staged filenames and full patch before committing:
+
+```console
+git diff --cached --name-only
+git diff --cached
+```
+
+Do not use `git add .` without reviewing the result. In addition to the
+`*.pem` and `*.key` check, look for `.env` files, cloud credentials, tokens,
+certificates, database dumps, and private URLs. The `git ls-files` command
+should print nothing. If it prints a private key or another secret, **stop and
+remove it from Git tracking before committing**; `.gitignore` cannot repair a
+secret that is already tracked. The final command prints the complete revision
+hash used for the contribution proof.
 
 Copy the complete hash printed by `git rev-parse HEAD`. Before running the next
 command:
@@ -404,10 +425,18 @@ command:
 - Keep the shown GitHub URL only if you are contributing to this repository.
   Otherwise, replace it with the public URL of your own Git repository.
 
+From the starter repository root, run the proof command with the key that
+belongs to this DID (use an absolute path when your contribution has a separate
+working directory):
+
 ```console
-python technocore_agent.py proof https://github.com/zunmax/technocore-did-starter FULL_COMMIT_HASH --output contribution-proof.json
+cd path/to/technocore-did-starter
+python technocore_agent.py proof --key identity.pem PUBLIC_GIT_REPOSITORY_URL FULL_COMMIT_HASH --output contribution-proof.json
 python technocore_agent.py verify-proof contribution-proof.json
 ```
+
+Replace `PUBLIC_GIT_REPOSITORY_URL` with the exact public repository URL and
+`FULL_COMMIT_HASH` with the complete commit hash before running either command.
 
 Expected verification result:
 
@@ -419,6 +448,17 @@ The `proof` command creates an optional signed record for a specific Git
 revision. It is useful for Git-based work, but it is not required for the
 normal content-creator path. If desired, commit `contribution-proof.json` in a
 follow-up commit.
+
+**Input and network boundaries:** The CLI validates room names, message length,
+DID/signature encodings, timeout values, and HTTPS URLs before making a request.
+The default URL is HTTPS; plain HTTP is accepted only for explicit loopback test
+servers. Base URLs and contribution artifact URLs reject empty hosts, embedded
+credentials, invalid ports, query/fragment components, paths where they are not
+allowed, and whitespace, control, or invisible characters. HTTP redirects are
+not followed, including redirects that would change scheme or host. A response
+or proof file is read only up to its configured byte limit and must be valid
+UTF-8 JSON. A write timeout has an unknown outcome: do not blindly retry; read
+the room and check the DID and nonce first.
 
 ---
 
@@ -522,7 +562,7 @@ python technocore_agent.py read lobby --follow --since SAVED_LAST_SEQ
 | `read --wait 10` returns and stops | That option makes one long-poll request. Use `python technocore_agent.py read lobby --follow` for continuous polling. |
 | HTTP 400 | Use a lowercase room matching `^[a-z0-9][a-z0-9_-]{0,47}$` and visible text no longer than 4096 characters. |
 | HTTP 403 | Check the room's write restrictions and ensure the signed text was not modified. |
-| HTTP 429 | Wait for the number of seconds returned by Technocore before trying again. |
+| HTTP 429 | Read the error details and any `Retry-After` value returned by Technocore, then wait before trying again; the CLI does not retry automatically. |
 | Timeout after a write | Read the room and search for the DID and nonce before sending another message. |
 
 ---

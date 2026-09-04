@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import getpass
+import ipaddress
 import json
 import math
 import os
@@ -14,11 +16,12 @@ import sys
 import time
 import unicodedata
 from collections.abc import Callable, Iterator
+from http.client import InvalidURL
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlsplit
-from urllib.request import Request, urlopen
+from urllib.parse import unquote, urlencode, urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import serialization
@@ -36,6 +39,7 @@ MIN_FOLLOW_INTERVAL_SECONDS = 0.5
 MAX_MESSAGE_CHARS = 4096
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 MAX_ERROR_RESPONSE_BYTES = 16 * 1024
+MAX_PROOF_BYTES = 256 * 1024
 MULTICODEC_ED25519 = b"\xed\x01"
 MULTIBASE_LENGTH = 48
 SIGNATURE_LENGTH = 86
@@ -65,6 +69,35 @@ class NetworkError(RuntimeError):
 
 class LocalFileError(RuntimeError):
     """A local public artifact could not be read or written safely."""
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    """Disable urllib's automatic redirect handling for every request."""
+
+    def redirect_request(
+        self,
+        request: Request,
+        file_object: Any,
+        code: int,
+        message: str,
+        headers: Any,
+        new_url: str,
+    ) -> None:
+        return None
+
+
+_NO_REDIRECT_OPENER = build_opener(_NoRedirectHandler)
+
+
+def urlopen(
+    request: Request,
+    data: bytes | None = None,
+    timeout: Any = None,
+) -> Any:
+    """Open a request without allowing urllib to follow redirects."""
+    if data is None:
+        return _NO_REDIRECT_OPENER.open(request, timeout=timeout)
+    return _NO_REDIRECT_OPENER.open(request, data=data, timeout=timeout)
 
 
 def base58btc_encode(data: bytes) -> str:
@@ -165,6 +198,20 @@ def validate_nonce(value: str | int) -> str:
     return nonce
 
 
+def _posted_nonce_matches(posted_nonce: Any, selected_nonce: str) -> bool:
+    """Accept only the canonical decimal representation of the nonce we sent."""
+    if isinstance(posted_nonce, bool):
+        return False
+    if isinstance(posted_nonce, int):
+        return str(posted_nonce) == selected_nonce
+    if isinstance(posted_nonce, str):
+        return (
+            posted_nonce == selected_nonce
+            and (posted_nonce == "0" or not posted_nonce.startswith("0"))
+        )
+    return False
+
+
 def next_nonce() -> str:
     """Create a high-resolution wall-clock nonce within the 19-digit limit."""
     return validate_nonce(time.time_ns())
@@ -181,10 +228,23 @@ def sign_bytes(private_key: Ed25519PrivateKey, payload: bytes) -> str:
 
 
 def verify_bytes(did: str, signature: str, payload: bytes) -> None:
-    """Verify a base64url Ed25519 signature against a did:key."""
-    if SIGNATURE_PATTERN.fullmatch(signature or "") is None:
+    """Verify a canonical base64url Ed25519 signature against a did:key."""
+    if (
+        not isinstance(signature, str)
+        or SIGNATURE_PATTERN.fullmatch(signature) is None
+    ):
         raise ProtocolError("signature must contain 86 unpadded base64url characters")
-    raw_signature = base64.urlsafe_b64decode(signature + "==")
+    try:
+        raw_signature = base64.b64decode(
+            signature + "==", altchars=b"-_", validate=True
+        )
+        canonical_signature = (
+            base64.urlsafe_b64encode(raw_signature).decode("ascii").rstrip("=")
+        )
+    except (binascii.Error, UnicodeError, ValueError) as error:
+        raise ProtocolError("signature is not valid base64url") from error
+    if canonical_signature != signature:
+        raise ProtocolError("signature must use canonical base64url encoding")
     try:
         public_key_from_did(did).verify(raw_signature, payload)
     except InvalidSignature as error:
@@ -314,40 +374,124 @@ def _load_pem_key(private_bytes: bytes, password: bytes) -> Any:
         ) from error
 
 
+def _reject_unsafe_url_text(value: str, label: str) -> None:
+    """Reject URL text that clients may interpret inconsistently."""
+    for index, character in enumerate(value):
+        if character == "%" and (
+            index + 2 >= len(value)
+            or re.fullmatch(r"[0-9A-Fa-f]{2}", value[index + 1 : index + 3]) is None
+        ):
+            raise ProtocolError(f"{label} contains an invalid percent escape")
+    for component in (value, unquote(value)):
+        for character in component:
+            if (
+                character.isspace()
+                or not character.isprintable()
+                or unicodedata.category(character) in INVISIBLE_CATEGORIES
+            ):
+                raise ProtocolError(
+                    f"{label} must not contain whitespace or invisible characters"
+                )
+
+
+def _validate_url(
+    value: str,
+    *,
+    label: str,
+    allow_loopback_http: bool = False,
+    allow_query: bool = False,
+    allow_path: bool = True,
+) -> Any:
+    """Parse and validate a URL before handing it to urllib/http.client."""
+    if not isinstance(value, str) or not value:
+        raise ProtocolError(f"{label} must be a non-empty URL")
+    if value != value.strip():
+        raise ProtocolError(f"{label} must not contain surrounding whitespace")
+    _reject_unsafe_url_text(value, label)
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+    except ValueError as error:
+        raise ProtocolError(f"{label} is malformed") from error
+    scheme = parsed.scheme.lower()
+    if not scheme or not parsed.netloc or not hostname:
+        raise ProtocolError(f"{label} must contain a host")
+    if parsed.username is not None or parsed.password is not None:
+        raise ProtocolError(f"{label} must not contain embedded credentials")
+    if not allow_query and "?" in value:
+        raise ProtocolError(f"{label} must not contain a query")
+    if "#" in value:
+        raise ProtocolError(f"{label} must not contain a fragment")
+    if not allow_path and parsed.path not in {"", "/"}:
+        raise ProtocolError(f"{label} must not contain a path")
+    if "\\" in parsed.netloc or "\\" in parsed.path:
+        raise ProtocolError(f"{label} contains an invalid path or host")
+
+    authority = parsed.netloc
+    if ":" in hostname:
+        if not authority.startswith("[") or "]" not in authority:
+            raise ProtocolError(f"{label} contains an invalid host")
+        closing_bracket = authority.find("]")
+        if closing_bracket != authority.rfind("]"):
+            raise ProtocolError(f"{label} contains an invalid host")
+        suffix = authority[closing_bracket + 1 :]
+        if suffix and not suffix.startswith(":"):
+            raise ProtocolError(f"{label} contains an invalid host")
+    elif any(character in authority for character in "[]"):
+        raise ProtocolError(f"{label} contains an invalid host")
+    if authority.endswith(":"):
+        raise ProtocolError(f"{label} contains an invalid port")
+    try:
+        _ = parsed.port
+    except ValueError as error:
+        raise ProtocolError(f"{label} contains an invalid port") from error
+    try:
+        if ":" in hostname:
+            if "%" in hostname:
+                raise ValueError("IPv6 zone identifiers are not allowed")
+            ipaddress.IPv6Address(hostname)
+        else:
+            ascii_hostname = hostname.encode("idna").decode("ascii")
+            if len(ascii_hostname) > 253 or any(
+                not label_part
+                or len(label_part) > 63
+                or label_part.startswith("-")
+                or label_part.endswith("-")
+                or not re.fullmatch(r"[A-Za-z0-9-]+", label_part)
+                for label_part in ascii_hostname.split(".")
+            ):
+                raise ValueError("invalid hostname")
+    except (UnicodeError, ValueError) as error:
+        raise ProtocolError(f"{label} contains an invalid host") from error
+
+    if scheme != "https":
+        loopback = hostname.lower() in {"localhost", "127.0.0.1", "::1"}
+        if not (allow_loopback_http and scheme == "http" and loopback):
+            raise ProtocolError(
+                f"{label} must use HTTPS, except for an explicit loopback test server"
+            )
+    return parsed
+
+
 def validate_base_url(base_url: str) -> str:
     """Require HTTPS except for explicit loopback development servers."""
-    if not isinstance(base_url, str) or not base_url or base_url != base_url.strip():
-        raise ProtocolError(
-            "base URL must be a non-empty URL without surrounding whitespace"
-        )
-    normalized = base_url.rstrip("/")
-    try:
-        parsed = urlsplit(normalized)
-    except ValueError as error:
-        raise ProtocolError("base URL is malformed") from error
-    loopback = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
-    if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
-        raise ProtocolError(
-            "base URL must use HTTPS, except for a loopback test server"
-        )
-    if not parsed.netloc or parsed.query or parsed.fragment:
-        raise ProtocolError("base URL must contain a host and no query or fragment")
-    if parsed.username is not None or parsed.password is not None:
-        raise ProtocolError("base URL must not contain embedded credentials")
-    if parsed.path not in {"", "/"}:
-        raise ProtocolError("base URL must not contain a path")
-    try:
-        _port = parsed.port
-    except ValueError as error:
-        raise ProtocolError("base URL contains an invalid port") from error
-    return normalized
+    _validate_url(
+        base_url,
+        label="base URL",
+        allow_loopback_http=True,
+        allow_path=False,
+    )
+    return base_url.rstrip("/")
 
 
 def validate_timeout(timeout: float) -> float:
     """Return a finite, positive HTTP timeout."""
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
         raise ProtocolError("timeout must be a finite number greater than zero")
-    selected = float(timeout)
+    try:
+        selected = float(timeout)
+    except (OverflowError, ValueError) as error:
+        raise ProtocolError("timeout must be a finite number greater than zero") from error
     if not math.isfinite(selected) or selected <= 0:
         raise ProtocolError("timeout must be a finite number greater than zero")
     return selected
@@ -355,16 +499,21 @@ def validate_timeout(timeout: float) -> float:
 
 def validate_follow_wait(wait: float) -> float:
     """Return a valid positive Technocore long-poll interval."""
-    if (
-        isinstance(wait, bool)
-        or not isinstance(wait, (int, float))
-        or not math.isfinite(float(wait))
-        or not 0 < wait <= 10
-    ):
+    if isinstance(wait, bool) or not isinstance(wait, (int, float)):
         raise ProtocolError(
             "follow wait must be greater than zero and at most 10 seconds"
         )
-    return float(wait)
+    try:
+        selected = float(wait)
+    except (OverflowError, ValueError) as error:
+        raise ProtocolError(
+            "follow wait must be greater than zero and at most 10 seconds"
+        ) from error
+    if not math.isfinite(selected) or not 0 < selected <= 10:
+        raise ProtocolError(
+            "follow wait must be greater than zero and at most 10 seconds"
+        )
+    return selected
 
 
 def request_json(
@@ -384,6 +533,8 @@ def request_json(
     try:
         with urlopen(request, timeout=selected_timeout) as response:
             raw_body = response.read(MAX_RESPONSE_BYTES + 1)
+    except InvalidURL as error:
+        raise NetworkError("Technocore request URL was invalid") from error
     except HTTPError as error:
         raw_error = error.read(MAX_ERROR_RESPONSE_BYTES + 1)
         truncated = len(raw_error) > MAX_ERROR_RESPONSE_BYTES
@@ -421,7 +572,7 @@ def request_json(
         ) from error
     try:
         payload = json.loads(body)
-    except json.JSONDecodeError as error:
+    except (json.JSONDecodeError, ValueError, UnicodeError, RecursionError) as error:
         raise NetworkError("Technocore returned a non-JSON response") from error
     if not isinstance(payload, dict):
         raise NetworkError("Technocore returned JSON that was not an object")
@@ -487,12 +638,7 @@ def post_signed_message(
             "Technocore accepted the request without returning a posted record"
         )
     posted_nonce = posted.get("nonce")
-    try:
-        matching_nonce = not isinstance(posted_nonce, bool) and int(
-            posted_nonce
-        ) == int(selected_nonce)
-    except (TypeError, ValueError):
-        matching_nonce = False
+    matching_nonce = _posted_nonce_matches(posted_nonce, selected_nonce)
     posted_seq = posted.get("seq")
     matching_record = (
         posted.get("from") == did
@@ -540,14 +686,15 @@ def read_room(
     if wait is not None:
         if since is None:
             raise ProtocolError("wait requires a since cursor")
-        if (
-            isinstance(wait, bool)
-            or not isinstance(wait, (int, float))
-            or not math.isfinite(float(wait))
-            or not 0 <= wait <= 10
-        ):
+        if isinstance(wait, bool) or not isinstance(wait, (int, float)):
             raise ProtocolError("wait must be between 0 and 10 seconds")
-        if validate_timeout(timeout) <= float(wait):
+        try:
+            selected_wait = float(wait)
+        except (OverflowError, ValueError) as error:
+            raise ProtocolError("wait must be between 0 and 10 seconds") from error
+        if not math.isfinite(selected_wait) or not 0 <= selected_wait <= 10:
+            raise ProtocolError("wait must be between 0 and 10 seconds")
+        if validate_timeout(timeout) <= selected_wait:
             raise ProtocolError("timeout must be greater than wait for long polling")
     query: dict[str, str | int | float] = {"format": "json", "limit": limit}
     if since is not None:
@@ -595,14 +742,20 @@ def follow_room(
             timeout=timeout,
         )
         cache_buster += 1
+        next_cursor = response["last_seq"]
+        if next_cursor < cursor:
+            raise NetworkError("Technocore moved the room cursor backwards")
         if response["messages"]:
-            next_cursor = response["last_seq"]
             if next_cursor <= cursor:
                 raise NetworkError(
                     "Technocore returned messages without advancing last_seq"
                 )
             cursor = next_cursor
             yield response
+        elif next_cursor > cursor:
+            # A deployment may advance its cursor while returning no retained rows.
+            # Keep following from that cursor instead of replaying an empty window.
+            cursor = next_cursor
         elapsed = time.monotonic() - request_started
         if elapsed < MIN_FOLLOW_INTERVAL_SECONDS:
             time.sleep(MIN_FOLLOW_INTERVAL_SECONDS - elapsed)
@@ -612,22 +765,13 @@ def contribution_payload(artifact_url: str, commit: str) -> bytes:
     """Build a deterministic payload linking a DID to one published revision."""
     if not isinstance(artifact_url, str) or not isinstance(commit, str):
         raise ProtocolError("artifact URL and commit must be strings")
-    if artifact_url != artifact_url.strip():
-        raise ProtocolError("artifact URL must not contain surrounding whitespace")
-    try:
-        parsed = urlsplit(artifact_url)
-    except ValueError as error:
-        raise ProtocolError("artifact URL is malformed") from error
-    if parsed.scheme != "https" or not parsed.netloc or parsed.fragment:
-        raise ProtocolError(
-            "artifact URL must be an absolute HTTPS URL without a fragment"
-        )
-    if parsed.username is not None or parsed.password is not None:
-        raise ProtocolError("artifact URL must not contain embedded credentials")
-    try:
-        _port = parsed.port
-    except ValueError as error:
-        raise ProtocolError("artifact URL contains an invalid port") from error
+    _validate_url(
+        artifact_url,
+        label="artifact URL",
+        allow_loopback_http=False,
+        allow_query=False,
+        allow_path=True,
+    )
     if COMMIT_PATTERN.fullmatch(commit) is None:
         raise ProtocolError(
             "commit must be a complete 40- or 64-character hexadecimal revision"
@@ -661,6 +805,8 @@ def create_contribution_proof(
 
 def verify_contribution_proof(proof: dict[str, Any]) -> None:
     """Validate a contribution proof's shape and Ed25519 signature."""
+    if not isinstance(proof, dict):
+        raise ProtocolError("contribution proof must contain an object")
     if proof.get("schema") != "technocore-contribution-proof-v1":
         raise ProtocolError("unsupported contribution proof schema")
     required = ("did", "artifact_url", "commit", "signature")
@@ -849,8 +995,18 @@ def run_command(args: argparse.Namespace) -> int:
     if args.command == "verify-proof":
         proof_path = args.proof_file.expanduser().resolve()
         try:
-            proof = json.loads(proof_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
+            with proof_path.open("rb") as proof_file:
+                proof_bytes = proof_file.read(MAX_PROOF_BYTES + 1)
+        except (OSError, UnicodeError, ValueError, RecursionError) as error:
+            raise LocalFileError(f"cannot read proof JSON: {error}") from error
+        if len(proof_bytes) > MAX_PROOF_BYTES:
+            raise LocalFileError(
+                f"proof JSON exceeded the {MAX_PROOF_BYTES}-byte safety limit"
+            )
+        try:
+            proof_text = proof_bytes.decode("utf-8")
+            proof = json.loads(proof_text)
+        except (UnicodeError, ValueError, RecursionError) as error:
             raise LocalFileError(f"cannot read proof JSON: {error}") from error
         if not isinstance(proof, dict):
             raise ProtocolError("proof JSON must contain an object")

@@ -4,9 +4,14 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 
-# Technocore identity
+# Technocore identity and local credentials
 *.pem
 *.key
+*.env
+.env.*
+!.env.example
+*.p12
+*.pfx
 
 # Local editor files
 .idea/

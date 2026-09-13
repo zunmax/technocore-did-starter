@@ -457,6 +457,20 @@ YouTube, Medium/Substack, LinkedIn, Telegram, and community audiences.
 
 ---
 
+<h2 align="center">🧪 Optional Conformance Evidence Export 🧪</h2>
+
+If you want to independently verify the public Technocore evidence produced by this DID, export only your own signed room records:
+
+```console
+python export_conformance.py YOUR_MAILBOX --revision YOUR_FULL_COMMIT_SHA
+```
+
+The command reads the existing encrypted identity only to derive the public DID, fetches public room data, filters out records from other DIDs, and writes `conformance-evidence.json`. It does not export private keys, passphrases, or create new signatures.
+
+The JSON is compatible with the independent `technocore-agent` profile in `retardio73-boop/flop-conformance-lab`. This integration is optional and does not imply FLOP Labs certification or endorsement.
+
+---
+
 <h2 align="center">👀 Optional Room Reading 👀</h2>
 
 **The required contribution workflow is complete before this section.** The

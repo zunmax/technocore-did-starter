@@ -1,0 +1,30 @@
+name: FLOP conformance
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "technocore_agent.py"
+      - "requirements.txt"
+      - "tools/export_flop_signed_message.py"
+      - ".github/workflows/flop-conformance.yml"
+jobs:
+  signed-message:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements.txt
+      - run: python technocore_agent.py --version
+      - run: python tools/export_flop_signed_message.py
+      - id: conformance
+        uses: retardio73-boop/flop-conformance-lab@703428591d876c4eb1a87c5002dab0593740f117
+        with:
+          profile: technocore-signed-message
+          input: evidence/flop-technocore-signed-message.json
+          out: conformance-report.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flop-technocore-signed-message
+          path: conformance-report.json

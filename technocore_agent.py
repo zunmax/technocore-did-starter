@@ -257,12 +257,27 @@ def create_identity(
     return did_from_private_key(private_key)
 
 
+def _read_passline(prompt: str) -> str:
+    """Read a passphrase from the console, or from stdin when redirected.
+
+    Windows getpass reads the console via msvcrt even when stdin is
+    redirected, so 'init < passphrase.txt' would hang. Prefer stdin
+    whenever it is not a TTY; interactive behavior is unchanged.
+    """
+    if not sys.stdin.isatty():
+        line = sys.stdin.readline()
+        if not line:
+            raise IdentityError("no passphrase provided on stdin")
+        return line.rstrip("\n")
+    return getpass.getpass(prompt)
+
+
 def load_identity(
     path: Path,
     passphrase: bytes | None = None,
     *,
     allow_prompt: bool = True,
-    password_prompt: Callable[[str], str] = getpass.getpass,
+    password_prompt: Callable[[str], str] = _read_passline,
 ) -> Ed25519PrivateKey:
     """Load an Ed25519 identity, prompting only when an encrypted key requires it."""
     resolved = path.expanduser().resolve()
@@ -709,8 +724,8 @@ def write_new_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _prompt_new_passphrase() -> str:
-    first = getpass.getpass("New identity passphrase (12+ characters): ")
-    second = getpass.getpass("Confirm identity passphrase: ")
+    first = _read_passline("New identity passphrase (12+ characters): ")
+    second = _read_passline("Confirm identity passphrase: ")
     if first != second:
         raise IdentityError("passphrases do not match")
     if len(first) < 12:
